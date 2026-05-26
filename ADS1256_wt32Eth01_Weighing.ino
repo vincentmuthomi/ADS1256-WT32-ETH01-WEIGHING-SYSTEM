@@ -1,26 +1,24 @@
 #include <SPI.h>
 
-// --- PIN MAPPING FOR WT32-ETH01 ---
 #define ADS_SCLK 14
 #define ADS_DIN 15   // MOSI
 #define ADS_DOUT 2   // MISO
 #define ADS_CS 4
 #define ADS_DRDY 36
 
-// --- ADS1256 REGISTER DEFINITIONS ---
+
 #define REG_STATUS 0x00
 #define REG_MUX 0x01
 #define REG_ADCON 0x02
 #define REG_DRATE 0x03
 
-// --- ADS1256 COMMANDS ---
 #define CMD_WAKEUP 0x00
 #define CMD_RDATA 0x01
 #define CMD_SELFCAL 0xF0
 #define CMD_SYNC 0xFC
 #define CMD_RESET 0xFE
 
-// --- GLOBAL PARAMETERS ---
+
 const int NUM_LOAD_CELLS = 2;
 const int AVG_SAMPLES = 7;
 const int OUTLIER_WINDOW_SAMPLES = 3;
@@ -44,16 +42,13 @@ struct LoadCellState {
 	bool is_tared;
 	float capacity_g;
 	float overload_margin;
-
 	long samples[AVG_SAMPLES];
 	int sample_idx;
 	int sample_count;
 	long sample_sum;
-
 	int tare_collect_count;
 	long tare_collect_sum;
 	long last_raw;
-
 	long outlier_samples[OUTLIER_WINDOW_SAMPLES];
 	int outlier_idx;
 	int outlier_count;
@@ -65,7 +60,6 @@ LoadCellState cells[NUM_LOAD_CELLS] = {
 };
 
 unsigned long last_print_ms = 0;
-
 void initADS1256();
 void writeReg(uint8_t reg, uint8_t val);
 bool waitDRDY(uint32_t timeoutMs);
@@ -86,18 +80,12 @@ void showCalibration(int cellIndex);
 void setup() {
 	Serial.begin(115200);
 	Serial.setTimeout(SERIAL_READ_TIMEOUT_MS);
-
 	pinMode(ADS_CS, OUTPUT);
 	pinMode(ADS_DRDY, INPUT);
-
 	delay(100);
-
-	// Initialize SPI for WT32-ETH01
 	SPI.begin(ADS_SCLK, ADS_DOUT, ADS_DIN, ADS_CS);
 	SPI.beginTransaction(SPISettings(ADS_SPI_HZ, MSBFIRST, SPI_MODE1));
-
 	initADS1256();
-
 	Serial.println("ADS1256 Ready (2 load cells).");
 	Serial.println("Keep both scales unloaded for auto-tare...");
 	printCommandHelp();
@@ -110,53 +98,38 @@ void loop() {
 		if (!ok) {
 			continue;
 		}
-
 		long dampedRaw = dampOutlierRaw(cells[i], raw);
 		long smoothRaw = rollingAverage(cells[i], dampedRaw);
 		cells[i].last_raw = smoothRaw;
 		handleAutoTare(cells[i], smoothRaw);
 	}
-
 	if (millis() - last_print_ms >= PRINT_INTERVAL_MS) {
 		last_print_ms = millis();
 		printCellReadings();
 	}
-
 	serviceSerialCommands();
 }
 
-// --- ADS1256 CONFIGURATION ---
 void initADS1256() {
 	digitalWrite(ADS_CS, LOW);
 	SPI.transfer(CMD_RESET);
 	digitalWrite(ADS_CS, HIGH);
 	delay(5);
 	waitDRDY(500);
-
-	// ACAL off so MUX switching between channels does not trigger auto-cal every time.
 	writeReg(REG_STATUS, 0x00);
-
-	// Start on load cell 1 input pair by default.
 	writeReg(REG_MUX, cells[0].mux);
-
-	// PGA gain 64 for load cells.
 	writeReg(REG_ADCON, 0x06);
-
-	// Increase sample rate to reduce latency when scanning two channels.
 	writeReg(REG_DRATE, ADS_DRATE_VALUE);
-
-	// Run one full self-calibration at startup.
 	digitalWrite(ADS_CS, LOW);
 	SPI.transfer(CMD_SELFCAL);
 	digitalWrite(ADS_CS, HIGH);
-
 	waitDRDY(1000);
 }
 
 void writeReg(uint8_t reg, uint8_t val) {
 	digitalWrite(ADS_CS, LOW);
-	SPI.transfer(0x50 | reg);  // WREG opcode
-	SPI.transfer(0x00);        // Write 1 register
+	SPI.transfer(0x50 | reg);  
+	SPI.transfer(0x00); 
 	SPI.transfer(val);
 	digitalWrite(ADS_CS, HIGH);
 	delayMicroseconds(ADS_REG_WRITE_DELAY_US);
@@ -177,7 +150,6 @@ bool startConversionAndWait(uint32_t timeoutMs) {
 	SPI.transfer(CMD_SYNC);
 	SPI.transfer(CMD_WAKEUP);
 	digitalWrite(ADS_CS, HIGH);
-
 	return waitDRDY(timeoutMs);
 }
 
@@ -185,34 +157,27 @@ long readADSData24() {
 	digitalWrite(ADS_CS, LOW);
 	SPI.transfer(CMD_RDATA);
 	delayMicroseconds(10);
-
 	uint8_t h = SPI.transfer(0xFF);
 	uint8_t m = SPI.transfer(0xFF);
 	uint8_t l = SPI.transfer(0xFF);
 	digitalWrite(ADS_CS, HIGH);
-
 	long val = ((long)h << 16) | ((long)m << 8) | (long)l;
 	if (val & 0x800000) {
-		val |= 0xFF000000;  // Sign extension for 24-bit value
+		val |= 0xFF000000;
 	}
-
 	return val;
 }
 
 long readADSValueForMux(uint8_t mux, bool &ok) {
 	writeReg(REG_MUX, mux);
-
 	long val = 0;
-	// First conversion after MUX change can contain residue from prior channel.
 	for (uint8_t i = 0; i <= ADS_DISCARD_AFTER_MUX; i++) {
 		if (!startConversionAndWait(ADS_PER_CHANNEL_TIMEOUT_MS)) {
 			ok = false;
 			return 0;
 		}
-
 		val = readADSData24();
 	}
-
 	ok = true;
 	return val;
 }
@@ -222,115 +187,72 @@ long dampOutlierRaw(LoadCellState &cell, long newRaw) {
 		cell.outlier_samples[0] = newRaw;
 		cell.outlier_count = 1;
 		cell.outlier_idx = 1;
-		return newRaw;
-	}
-
+		return newRaw;}
 	long sum = 0;
-	for (int i = 0; i < cell.outlier_count; i++) {
-		sum += cell.outlier_samples[i];
-	}
+	for (int i = 0; i < cell.outlier_count; i++) {sum += cell.outlier_samples[i];}
 	long baseline = sum / cell.outlier_count;
-
 	float calib = cell.calibration_factor;
-	if (calib < 0.0f) {
-		calib = -calib;
-	}
-	if (calib < 1.0f) {
-		calib = DEFAULT_CALIBRATION_FACTOR;
-	}
-
+	if (calib < 0.0f) {calib = -calib;}
+	if (calib < 1.0f) {calib = DEFAULT_CALIBRATION_FACTOR;}
 	long thresholdCounts = (long)(calib * OUTLIER_THRESHOLD_G);
-	if (thresholdCounts < 1) {
-		thresholdCounts = 1;
-	}
-
+	if (thresholdCounts < 1) {thresholdCounts = 1;}
 	long delta = newRaw - baseline;
 	long damped = newRaw;
-	if (delta > thresholdCounts) {
-		damped = baseline + thresholdCounts;
-	} else if (delta < -thresholdCounts) {
-		damped = baseline - thresholdCounts;
-	}
-
+	if (delta > thresholdCounts) {damped = baseline + thresholdCounts;} else if (delta < -thresholdCounts) {damped = baseline - thresholdCounts;}
 	cell.outlier_samples[cell.outlier_idx] = damped;
 	cell.outlier_idx = (cell.outlier_idx + 1) % OUTLIER_WINDOW_SAMPLES;
-	if (cell.outlier_count < OUTLIER_WINDOW_SAMPLES) {
-		cell.outlier_count++;
-	}
-
+	if (cell.outlier_count < OUTLIER_WINDOW_SAMPLES) {cell.outlier_count++;}
 	return damped;
 }
 
 long rollingAverage(LoadCellState &cell, long newVal) {
-	if (cell.sample_count < AVG_SAMPLES) {
-		cell.sample_count++;
-	} else {
-		cell.sample_sum -= cell.samples[cell.sample_idx];
-	}
-
+	if (cell.sample_count < AVG_SAMPLES) {cell.sample_count++;} else {cell.sample_sum -= cell.samples[cell.sample_idx];}
 	cell.samples[cell.sample_idx] = newVal;
 	cell.sample_sum += newVal;
 	cell.sample_idx = (cell.sample_idx + 1) % AVG_SAMPLES;
-
 	return cell.sample_sum / cell.sample_count;
 }
-
 void handleAutoTare(LoadCellState &cell, long smoothRaw) {
-	if (cell.is_tared || millis() <= STARTUP_SETTLE_MS) {
-		return;
-	}
-
+	if (cell.is_tared || millis() <= STARTUP_SETTLE_MS) {return;	}
 	cell.tare_collect_sum += smoothRaw;
 	cell.tare_collect_count++;
-
 	if (cell.tare_collect_count >= STARTUP_TARE_SAMPLES) {
 		cell.tare_offset = cell.tare_collect_sum / STARTUP_TARE_SAMPLES;
 		cell.is_tared = true;
-
 		Serial.print(cell.name);
 		Serial.print(" auto-tare complete. Offset=");
-		Serial.println(cell.tare_offset);
-	}
+		Serial.println(cell.tare_offset);}
 }
 
 float computeWeight(const LoadCellState &cell, long smoothRaw) {
 	if (cell.calibration_factor == 0.0f) {
 		return 0.0f;
 	}
-
 	float weight = ((float)(smoothRaw - cell.tare_offset)) / cell.calibration_factor;
 	if (weight < 0.0f && weight > -5.0f) {
-		weight = 0.0f;
-	}
-
+		weight = 0.0f;}
 	return weight;
 }
 
 void printCellReadings() {
 	for (int i = 0; i < NUM_LOAD_CELLS; i++) {
 		LoadCellState &cell = cells[i];
-
 		if (i > 0) {
 			Serial.print(" || ");
 		}
-
 		Serial.print(cell.name);
-
 		if (!cell.is_tared) {
 			Serial.print(" | taring...");
 			continue;
 		}
-
 		float weight = computeWeight(cell, cell.last_raw);
 		Serial.print(" | Weight:");
 		Serial.print(weight, 2);
 		Serial.print(" g");
-
 		if (weight > cell.capacity_g * cell.overload_margin) {
 			Serial.print(" | WARNING: OVERLOAD");
 		}
 	}
-
 	Serial.println();
 }
 
@@ -364,19 +286,19 @@ void showCalibration(int cellIndex) {
 
 void printCommandHelp() {
 	Serial.println("Commands:");
-	Serial.println("  z1 / z2               -> manual tare load cell 1 or 2");
-	Serial.println("  c1 <grams> / c2 <grams> -> calibrate load cell 1 or 2");
-	Serial.println("  f, f1, f2             -> show calibration factor(s)");
-	Serial.print("  Filter: avg=");
+	Serial.println("  z1 / z2                 : manual tare load cell 1 or 2");
+	Serial.println("  c1 <grams> / c2 <grams> : calibrate load cell 1 or 2");
+	Serial.println("  f, f1, f2               : show calibration factor(s)");
+	Serial.print("  Filter: avg = ");
 	Serial.print(AVG_SAMPLES);
-	Serial.print(", outlier clamp=");
+	Serial.print(", outlier clamp = ");
 	Serial.print(OUTLIER_THRESHOLD_G, 1);
 	Serial.print("g over last ");
 	Serial.print(OUTLIER_WINDOW_SAMPLES);
-	Serial.println(" samples");
-	Serial.print("  ADS: 1000SPS, discard-after-mux=");
+	Serial.println(" samples ");
+	Serial.print("  ADS: 1000SPS, discard-after-mux= ");
 	Serial.println(ADS_DISCARD_AFTER_MUX);
-	Serial.println("  h                     -> show this help");
+	Serial.println("  h                     : show this help");
 }
 
 void serviceSerialCommands() {
